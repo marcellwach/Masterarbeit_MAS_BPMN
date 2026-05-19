@@ -2,6 +2,95 @@
 @tailwind components;
 @tailwind utilities;
 
+/* bpmn-js Modeler CSS – wird für Palette, Toolbar und BPMN-Icons benötigt */
+@import "bpmn-js/dist/assets/diagram-js.css";
+@import "bpmn-js/dist/assets/bpmn-js.css";
+@import "bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css";
+
+/* Kontrast-Overrides für bpmn-js Modeler */
+
+/* Palette (linke Sidebar) */
+.djs-palette {
+  background: #1e293b !important;
+  border-color: #475569 !important;
+}
+.djs-palette .entry {
+  color: #e2e8f0 !important;
+}
+.djs-palette .entry:hover {
+  background: #334155 !important;
+}
+.djs-palette .separator {
+  border-color: #475569 !important;
+}
+
+/* Context-Pad (Aktionsmenü um selektierte Elemente) */
+.djs-context-pad {
+  background: #1e293b !important;
+  border: 1px solid #475569 !important;
+  border-radius: 6px !important;
+}
+.djs-context-pad .entry {
+  color: #e2e8f0 !important;
+  background: #1e293b !important;
+}
+.djs-context-pad .entry:hover {
+  background: #334155 !important;
+}
+
+/* Popup-Menü (z.B. Element-Typ wechseln) */
+.djs-popup {
+  background: #1e293b !important;
+  border-color: #475569 !important;
+  color: #e2e8f0 !important;
+}
+.djs-popup .entry:hover {
+  background: #334155 !important;
+}
+
+/* Selection-Outline und Verbindungspfeile */
+.djs-element .djs-hit {
+  cursor: pointer;
+}
+.djs-connection .djs-visual path {
+  stroke: #94a3b8 !important;
+}
+
+/* Tooltip */
+.djs-tooltip {
+  background: #0f172a !important;
+  color: #e2e8f0 !important;
+  border: 1px solid #475569 !important;
+}
+
+/* BPMN-Element Labels – schwarze Schrift auf weißen Shapes */
+.djs-label,
+.djs-label text,
+.djs-element text {
+  fill: #111827 !important;
+  color: #111827 !important;
+}
+
+/* Direct-Editing Input (Text beim Doppelklick bearbeiten) */
+.djs-direct-editing-parent {
+  color: #111827 !important;
+  background: #ffffff !important;
+  border: 1px solid #3b82f6 !important;
+  border-radius: 2px !important;
+}
+.djs-direct-editing-parent [contenteditable],
+.djs-direct-editing-parent textarea,
+.djs-direct-editing-parent input {
+  color: #111827 !important;
+  background: transparent !important;
+  caret-color: #111827 !important;
+}
+
+/* Canvas-Hintergrund explizit weiß */
+.djs-container svg {
+  background: #f8f9fa;
+}
+
 :root {
   --background: #ffffff;
   --foreground: #171717;

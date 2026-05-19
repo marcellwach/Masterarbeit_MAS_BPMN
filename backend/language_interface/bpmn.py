@@ -175,10 +175,10 @@ Wenn du Feedback zu Fehlern erhältst, beachte die affected_elements und korrigi
                 f'{flow_refs(task["id"], "in")}{flow_refs(task["id"], "out")}</task>'
             )
         for gw in data.get("gateways", []):
+            # isMarkerVisible gehört ins DI (BPMNShape), nicht ins Prozess-Element
             gw_type = gw.get("type", "exclusiveGateway")
-            marker = ' isMarkerVisible="true"' if gw_type == "exclusiveGateway" else ""
             elements.append(
-                f'<{gw_type} id="{gw["id"]}" name="{_esc(gw["name"])}"{marker}>'
+                f'<{gw_type} id="{gw["id"]}" name="{_esc(gw["name"])}">'
                 f'{flow_refs(gw["id"], "in")}{flow_refs(gw["id"], "out")}</{gw_type}>'
             )
         for ee in data.get("end_events", []):

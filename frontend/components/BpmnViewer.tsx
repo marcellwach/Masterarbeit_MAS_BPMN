@@ -1,113 +1,168 @@
 "use client";
 
 /**
- * BpmnViewer – rechtes Panel der Split-Ansicht.
+ * BpmnViewer – BPMN-Anzeige und Bearbeitung in zwei Modi.
  *
- * Rendert BPMN-XML grafisch mit bpmn-js (NavigatedViewer, nur Anzeige, kein Editieren).
- * Vor dem Rendern wird bpmn-auto-layout angewendet, das automatisch ein
- * kollisionsfreies Layout mit orthogonalen Verbindungen berechnet.
+ * Modus "view": bpmn-js NavigatedViewer, bpmn-auto-layout für Layout
+ * Modus "edit": bpmn-js Modeler mit Palette und Bearbeitungswerkzeugen
  *
- * Technische Besonderheiten:
- *
- * 1. Dynamischer Import ("use client" verhindert SSR-Probleme, aber bpmn-js
- *    darf trotzdem nicht statisch importiert werden da es DOM voraussetzt).
- *
- * 2. viewerVersion-Zähler statt Boolean für viewerReady:
- *    React 18 StrictMode führt useEffect zweimal aus (mount → cleanup → mount).
- *    Ein Boolean-State würde beim zweiten setViewerReady(true) keinen Re-Render
- *    triggern → importXML wird nie aufgerufen. Ein Zähler (v => v + 1)
- *    ändert sich garantiert und triggert den XML-Import-Effect.
- *
- * 3. cancelled-Flag verhindert Race Conditions: falls cleanup vor dem
- *    async import() läuft, wird kein Viewer mehr erstellt.
+ * Viewport-Erhalt beim Moduswechsel:
+ *   Der canvas.viewbox() wird vor dem Zerstören der alten Instanz gesichert
+ *   und nach dem Import in der neuen Instanz wiederhergestellt.
+ *   Bei neuen XML-Inhalten (anderes Modell) wird stattdessen fit-viewport verwendet.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 
 type Props = {
   bpmnXml: string | null;
+  mode: "view" | "edit";
 };
 
-export default function BpmnViewer({ bpmnXml }: Props) {
+export type BpmnViewerHandle = {
+  saveSVG: () => Promise<{ svg: string }>;
+  getXML: () => Promise<string | null>;
+};
+
+const BpmnViewer = forwardRef<BpmnViewerHandle, Props>(({ bpmnXml, mode }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const viewerRef = useRef<any>(null);
-
-  // Zähler: jede (Re-)Initialisierung des Viewers erhöht den Wert →
-  // useEffect([viewerVersion, bpmnXml]) feuert garantiert auch beim zweiten Mount
+  const instanceRef = useRef<any>(null);
   const [viewerVersion, setViewerVersion] = useState(0);
   const [importError, setImportError] = useState<string | null>(null);
 
-  // Viewer einmalig initialisieren (dynamischer Import wegen DOM-Abhängigkeit)
+  // Viewport vor Moduswechsel speichern, um Zoom/Pan zu erhalten
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const savedViewportRef = useRef<any>(null);
+  // Letztes XML – erkennt ob XML wirklich neu ist oder nur Modus wechselt
+  const prevXmlRef = useRef<string | null>(null);
+
+  useImperativeHandle(ref, () => ({
+    saveSVG: () => instanceRef.current?.saveSVG() ?? Promise.reject("Nicht bereit"),
+    getXML: async () => {
+      if (!instanceRef.current) return null;
+      try {
+        const { xml } = await instanceRef.current.saveXML({ format: true });
+        return xml ?? null;
+      } catch {
+        return null;
+      }
+    },
+  }));
+
+  // Moduswechsel: Viewport sichern, Instanz neu erstellen
   useEffect(() => {
     if (!containerRef.current) return;
-    let cancelled = false;  // verhindert späte Callbacks nach Cleanup
+    let cancelled = false;
 
-    import("bpmn-js/lib/NavigatedViewer").then(({ default: BpmnJS }) => {
+    // Viewport vor dem Zerstören der alten Instanz sichern
+    if (instanceRef.current) {
+      try {
+        savedViewportRef.current = instanceRef.current.get("canvas").viewbox();
+      } catch {
+        savedViewportRef.current = null;
+      }
+    }
+
+    const initLib = mode === "edit"
+      ? import("bpmn-js/lib/Modeler")
+      : import("bpmn-js/lib/NavigatedViewer");
+
+    initLib.then(({ default: BpmnJS }) => {
       if (cancelled) return;
-      viewerRef.current?.destroy();
-      viewerRef.current = new BpmnJS({ container: containerRef.current! });
+      instanceRef.current?.destroy();
+      instanceRef.current = new BpmnJS({ container: containerRef.current! });
       setViewerVersion((v) => v + 1);
     });
 
     return () => {
       cancelled = true;
-      viewerRef.current?.destroy();
-      viewerRef.current = null;
+      instanceRef.current?.destroy();
+      instanceRef.current = null;
     };
-  }, []);
+  }, [mode]);
 
-  // XML importieren wenn Viewer bereit UND neues XML vorhanden
+  // XML importieren; Viewport nur bei neuem XML zurücksetzen
   useEffect(() => {
-    if (!viewerVersion || !bpmnXml || !viewerRef.current) return;
+    if (!viewerVersion || !bpmnXml || !instanceRef.current) return;
 
     setImportError(null);
+    const isNewXml = bpmnXml !== prevXmlRef.current;
+    prevXmlRef.current = bpmnXml;
 
-    // bpmn-auto-layout berechnet DI (Positionen + Pfad-Routing) aus dem Prozess-XML
-    import("bpmn-auto-layout").then(({ layoutProcess }) => {
-      return layoutProcess(bpmnXml);
-    }).then((laidOutXml: string) => {
-      return viewerRef.current.importXML(laidOutXml);
-    }).then(({ warnings }: { warnings: unknown[] }) => {
-      if (warnings.length > 0) console.warn("bpmn-js warnings:", warnings);
-      viewerRef.current.get("canvas").zoom("fit-viewport");
-    }).catch((err: Error) => {
-      console.error("bpmn layout/import error:", err);
-      // Fallback: Original-XML ohne Auto-Layout direkt importieren
-      viewerRef.current?.importXML(bpmnXml)
-        .then(() => viewerRef.current?.get("canvas").zoom("fit-viewport"))
-        .catch((e: Error) => setImportError(e.message));
-    });
-  }, [viewerVersion, bpmnXml]);
+    const doImport = async (xml: string) => {
+      try {
+        let xmlToImport = xml;
+        const needsLayout = !xml.includes("BPMNDiagram");
+
+        if (needsLayout || mode === "view") {
+          const { layoutProcess } = await import("bpmn-auto-layout");
+          xmlToImport = await layoutProcess(xml);
+        }
+
+        await instanceRef.current.importXML(xmlToImport);
+        const canvas = instanceRef.current.get("canvas");
+
+        if (isNewXml || !savedViewportRef.current) {
+          // Neues Modell → Inhalt einpassen
+          canvas.zoom("fit-viewport");
+          savedViewportRef.current = null;
+        } else {
+          // Moduswechsel → Viewbox nach nächstem Frame wiederherstellen
+          // (requestAnimationFrame: Canvas ist dann vollständig gerendert)
+          const vb = savedViewportRef.current;
+          savedViewportRef.current = null;
+          // Zwei Frames warten: bpmn-js macht nach importXML intern noch Reflows
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            try {
+              canvas.viewbox(vb);
+            } catch {
+              canvas.zoom("fit-viewport");
+            }
+          }));
+        }
+      } catch (err: unknown) {
+        console.error("bpmn import error:", err);
+        try {
+          await instanceRef.current.importXML(xml);
+          instanceRef.current.get("canvas").zoom("fit-viewport");
+        } catch (e: unknown) {
+          setImportError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    };
+
+    doImport(bpmnXml);
+  }, [viewerVersion, bpmnXml, mode]);
 
   return (
     <div className="relative w-full h-full bg-gray-900">
-      {/* Header */}
       <div className="absolute top-0 left-0 right-0 z-10 px-4 py-3 border-b border-gray-700 bg-gray-900">
         <h2 className="font-semibold text-base">BPMN-Viewer</h2>
         <p className="text-xs text-gray-400">
-          {bpmnXml ? "Validiertes BPMN 2.0 Modell" : "Noch kein Modell vorhanden"}
+          {!bpmnXml
+            ? "Noch kein Modell vorhanden"
+            : mode === "edit"
+            ? "Manueller Bearbeitungsmodus"
+            : "Validiertes BPMN 2.0 Modell"}
         </p>
       </div>
 
-      {/* bpmn-js rendert sein SVG in diesen Container */}
       <div
         ref={containerRef}
         className="absolute inset-0 top-[57px]"
         style={{ background: "#f8f9fa" }}
       />
 
-      {/* Fehlermeldung bei Layout- oder Parsing-Fehler */}
       {importError && (
         <div className="absolute inset-0 top-[57px] flex items-center justify-center z-20 pointer-events-none">
           <div className="bg-red-900/80 border border-red-500 rounded-lg p-4 max-w-lg text-sm text-red-200">
-            <p className="font-bold mb-1">Layout-Fehler:</p>
+            <p className="font-bold mb-1">Import-Fehler:</p>
             <p className="font-mono break-all">{importError}</p>
           </div>
         </div>
       )}
 
-      {/* Placeholder solange noch kein Modell generiert wurde */}
       {!bpmnXml && (
         <div className="absolute inset-0 top-[57px] flex items-center justify-center pointer-events-none">
           <div className="text-center text-gray-400">
@@ -119,4 +174,7 @@ export default function BpmnViewer({ bpmnXml }: Props) {
       )}
     </div>
   );
-}
+});
+
+BpmnViewer.displayName = "BpmnViewer";
+export default BpmnViewer;
