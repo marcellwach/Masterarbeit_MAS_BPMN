@@ -52,8 +52,24 @@
 .djs-element .djs-hit {
   cursor: pointer;
 }
+
+/* BPMN-Shape Ränder: schwarze Konturen für Tasks, Events, Gateways */
+.djs-shape .djs-visual rect,
+.djs-shape .djs-visual circle,
+.djs-shape .djs-visual ellipse,
+.djs-shape .djs-visual polygon,
+.djs-shape .djs-visual path {
+  stroke: #111827 !important;
+}
+
+/* Swimlane-Ränder ebenfalls schwarz */
+.djs-shape.djs-element .djs-visual rect {
+  stroke: #111827 !important;
+}
+
+/* Sequenzfluss-Pfeile dunkel */
 .djs-connection .djs-visual path {
-  stroke: #94a3b8 !important;
+  stroke: #111827 !important;
 }
 
 /* Tooltip */

@@ -44,35 +44,35 @@ Nutzer gibt Prozessbeschreibung ein
 ## Architektur
 
 ```
-frontend/                      # Next.js + bpmn-js
-├── app/page.tsx               # Haupt-Layout, Socket.IO-Client
+frontend/                      # Next.js 14 + bpmn-js
+├── app/
+│   ├── page.tsx               # Haupt-Layout, Socket.IO-Client, Modifikationsmodus
+│   └── validate/page.tsx      # Standalone-Validator für beliebige LLM-Outputs
 └── components/
     ├── ChatPanel.tsx          # Eingabe + Statusmeldungen
-    ├── BpmnViewer.tsx         # bpmn-js Viewer + bpmn-auto-layout
+    ├── BpmnViewer.tsx         # bpmn-js Viewer/Editor + bpmn-auto-layout
+    ├── ExportBar.tsx          # Import/Export XML/SVG, Manuell-Modus, Eval-Export
     └── DebugPanel.tsx         # Entwickler-Debug-Overlay (nur dev)
 
-backend/                       # FastAPI + LangGraph
-├── main.py                    # FastAPI + Socket.IO Server
+backend/                       # FastAPI + LangGraph + Anthropic
+├── main.py                    # FastAPI + Socket.IO Server + HTTP-Endpunkte
 ├── graph.py                   # LangGraph StateGraph
 ├── agents/
-│   ├── generator.py           # DP1+DP2: BPMN-Generierung via Claude
-│   ├── validator.py           # DP1: lxml + pm4py, kein LLM
-│   └── coordinator.py        # DP1+DP3+DP4: Orchestrierung
+│   ├── generator.py           # DP1+DP2: BPMN-Generierung via Claude tool_use
+│   ├── validator.py           # DP1: lxml + pm4py/Woflan, kein LLM
+│   └── coordinator.py        # DP1+DP3+DP4: Orchestrierung + Socket.IO-Events
 ├── language_interface/
 │   ├── base.py                # DP5: Abstrakte Basisklasse
 │   └── bpmn.py                # BPMN-2.0-Implementierung
 ├── models/
-│   ├── feedback.py            # Pydantic: ValidationResult, Violation
-│   ├── trace.py               # Pydantic: TraceLog-Modelle
-│   └── state.py               # LangGraph AgentState
+│   ├── feedback.py            # Pydantic: ValidationResult, Violation, ErrorType
+│   ├── trace.py               # Pydantic: TraceLog, OutputTraceEntry, ...
+│   └── state.py               # LangGraph AgentState (TypedDict)
 └── trace_logger/
     └── logger.py              # DP4: Drei-Ebenen-Logger
 
 evaluation/
-└── evaluate.py                # Metrik-Berechnung GZ1/GZ2/GZ4
-
-poc/
-└── test_outlines_anthropic.py # Technische Risikovalidierung DP2
+└── evaluate.py                # Metrik-Berechnung GZ1/GZ2/GZ4 (CLI)
 ```
 
 ---
@@ -91,9 +91,14 @@ cd backend
 pip install -r requirements.txt
 
 # .env anlegen (Vorlage: .env.example)
-cp ../.env.example ../.env
+copy ..\.env.example ..\.env
 # ANTHROPIC_API_KEY in .env eintragen
+```
 
+**Windows (PowerShell):**
+```powershell
+# Backend als Windows-Prozess starten (nicht per Bash – pkill kann Windows-Prozesse nicht killen)
+Set-Location backend
 python -m uvicorn main:socket_app --host 0.0.0.0 --port 8000
 ```
 
@@ -126,7 +131,7 @@ Berechnet:
 
 ### DP2: tool_use statt Outlines
 
-Technischer PoC (`poc/test_outlines_anthropic.py`) ergab: Outlines 1.3.0 unterstützt keine structured generation mit der Anthropic API (`NotImplementedError`). Als gleichwertiger Mechanismus wird Anthropics `tool_use` mit JSON-Schema genutzt – der Constraint greift API-seitig und garantiert schema-konformen Output.
+Technischer PoC ergab: Outlines 1.3.0 unterstützt keine structured generation mit der Anthropic API (`NotImplementedError`). Als gleichwertiger Mechanismus wird Anthropics `tool_use` mit JSON-Schema genutzt – der Constraint greift API-seitig und garantiert schema-konformen Output.
 
 ### Soundness-Prüfung
 
@@ -140,6 +145,29 @@ Bewusst **kein LLM** für Validierung (DP1: Self-Preference Bias vermeiden).
 ### Iterative Modifikation
 
 Das Frontend sendet bei Folge-Prompts das bestehende BPMN-XML mit. Claude erhält es als Kontext und modifiziert das Modell gezielt, ohne es neu zu generieren.
+
+---
+
+## HTTP-Endpunkte (Backend)
+
+| Methode | Pfad | Beschreibung |
+|---------|------|--------------|
+| `POST` | `/api/validate` | Syntax + Soundness für beliebiges BPMN-XML (Baseline-Evaluation) |
+| `GET` | `/api/export/report` | GZ1/GZ2/GZ4-Metriken aus allen Trace-Logs |
+| `GET` | `/api/export/traces` | ZIP aller Trace-Logs |
+| `GET` | `/api/export/traces/{id}` | Einzelner Trace-Log als JSON |
+| `GET` | `/api/export/bpmn/{id}` | BPMN-XML einer Session |
+| `GET` | `/api/sessions` | Sessionliste mit Kurzinfo |
+
+---
+
+## Known Limitations
+
+1. **XSD-Validierung**: Nur Wohlgeformtheit + Referenzintegrität (OMG BPMN 2.0 XSD ist multi-file, nicht direkt ladbar)
+2. **Swimlanes/Pools**: Nicht unterstützt – `bpmn-auto-layout` verarbeitet BPMN-Collaboration-Strukturen nicht korrekt (`attachedToRef`-Bug). Gilt als Stand der Technik auch für andere Tools.
+3. **Random Seed**: Anthropic API unterstützt keinen Seed-Parameter
+4. **Baseline-Vergleich**: Monolithisches System und GPT-4o-Vergleich nicht implementiert
+5. **Wiederholungen**: 3x-Wiederholung pro Testszenario nicht automatisiert
 
 ---
 
