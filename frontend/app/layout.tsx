@@ -1,3 +1,15 @@
+/**
+ * Root-Layout – gemeinsames HTML-Grundgerüst für alle Seiten.
+ *
+ * Lädt die Geist-Schriftfamilie (Variable Fonts: GeistVF + GeistMonoVF) und
+ * setzt globale CSS-Klassen. `overflow-hidden` verhindert Doppel-Scrollbars,
+ * da alle Seiten ein `fixed inset-0`-Layout verwenden.
+ *
+ * Metadaten:
+ *   title:       "MAS BPMN Generator" (erscheint im Browser-Tab)
+ *   description: Für Suchmaschinen und OpenGraph-Previews
+ */
+
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import "./globals.css";

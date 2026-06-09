@@ -19,16 +19,20 @@ type Props = {
   mode: "view" | "edit";
 };
 
+/**
+ * Ref-Handle: erlaubt der Elternkomponente (page.tsx, ExportBar) kontrollierten
+ * Zugriff auf bpmn-js-Instanz-Methoden ohne direkten State-Lift.
+ */
 export type BpmnViewerHandle = {
-  saveSVG: () => Promise<{ svg: string }>;
-  getXML: () => Promise<string | null>;
+  saveSVG: () => Promise<{ svg: string }>;  // SVG-Export für den Download-Button
+  getXML: () => Promise<string | null>;     // Aktuelles XML auslesen (bei manuellem Edit)
 };
 
 const BpmnViewer = forwardRef<BpmnViewerHandle, Props>(({ bpmnXml, mode }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const instanceRef = useRef<any>(null);
-  const [viewerVersion, setViewerVersion] = useState(0);
+  const instanceRef = useRef<any>(null);    // aktive bpmn-js Instanz (NavigatedViewer oder Modeler)
+  const [viewerVersion, setViewerVersion] = useState(0);  // Trigger für XML-Import nach Instanz-Neustart
   const [importError, setImportError] = useState<string | null>(null);
 
   // Viewport vor Moduswechsel speichern, um Zoom/Pan zu erhalten
@@ -64,9 +68,10 @@ const BpmnViewer = forwardRef<BpmnViewerHandle, Props>(({ bpmnXml, mode }, ref) 
       }
     }
 
+    // Lazy-Import: bpmn-js ist groß (~2 MB), wird erst beim ersten Rendern geladen
     const initLib = mode === "edit"
-      ? import("bpmn-js/lib/Modeler")
-      : import("bpmn-js/lib/NavigatedViewer");
+      ? import("bpmn-js/lib/Modeler")      // Palette + Bearbeitungswerkzeuge
+      : import("bpmn-js/lib/NavigatedViewer"); // nur Zoom/Pan, kein Edit
 
     initLib.then(({ default: BpmnJS }) => {
       if (cancelled) return;
@@ -93,6 +98,7 @@ const BpmnViewer = forwardRef<BpmnViewerHandle, Props>(({ bpmnXml, mode }, ref) 
     const doImport = async (xml: string) => {
       try {
         let xmlToImport = xml;
+        // Backend generiert kein DI – bpmn-auto-layout berechnet es im Browser
         const needsLayout = !xml.includes("BPMNDiagram");
 
         if (needsLayout || mode === "view") {

@@ -21,7 +21,6 @@ import Link from "next/link";
 import ChatPanel from "@/components/ChatPanel";
 import BpmnViewer, { BpmnViewerHandle } from "@/components/BpmnViewer";
 import ExportBar from "@/components/ExportBar";
-import DebugPanel, { DebugEvent } from "@/components/DebugPanel";
 
 export type Message = {
   type: "user" | "system" | "error" | "success";
@@ -32,34 +31,23 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [currentBpmnXml, setCurrentBpmnXml] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [debugEvents, setDebugEvents] = useState<DebugEvent[]>([]);
   const [viewerMode, setViewerMode] = useState<"view" | "edit">("view");
   const socketRef = useRef<Socket | null>(null);
   const sessionIdRef = useRef<string>(crypto.randomUUID());
   const bpmnViewerRef = useRef<BpmnViewerHandle>(null);
 
-  const addDebug = (event: string, data: unknown) => {
-    setDebugEvents((prev) => [
-      ...prev,
-      { ts: new Date().toISOString().slice(11, 23), event, data },
-    ]);
-  };
-
+  // Socket.IO-Verbindung aufbauen – ein Socket pro Seitenaufruf, Cleanup beim Unmount
   useEffect(() => {
     const socket = io("http://localhost:8000", { transports: ["websocket"] });
     socketRef.current = socket;
 
-    socket.on("connect", () => addDebug("connect", { id: socket.id }));
-    socket.on("disconnect", (reason) => addDebug("disconnect", { reason }));
-    socket.on("connect_error", (err) => addDebug("connect_error", { message: err.message }));
-
+    // Iterationsstatus: erscheint als grauer Systemtext im ChatPanel
     socket.on("status_update", (data: { message: string; iteration: number }) => {
-      addDebug("status_update", data);
       setMessages((prev) => [...prev, { type: "system", text: data.message }]);
     });
 
+    // Erfolg: BPMN-XML im Viewer anzeigen, isLoading beenden
     socket.on("bpmn_result", (data: { bpmn_xml: string }) => {
-      addDebug("bpmn_result", { xml_length: data.bpmn_xml.length, xml_preview: data.bpmn_xml.slice(0, 400) });
       setCurrentBpmnXml(data.bpmn_xml);
       setMessages((prev) => [
         ...prev,
@@ -68,8 +56,8 @@ export default function Home() {
       setIsLoading(false);
     });
 
+    // Fehler (max_iterations oder Backend-Exception): Fehlermeldung im Chat
     socket.on("generation_failed", (data: { reason: string }) => {
-      addDebug("generation_failed", data);
       setMessages((prev) => [
         ...prev,
         { type: "error", text: `Generierung fehlgeschlagen: ${data.reason}` },
@@ -80,6 +68,16 @@ export default function Home() {
     return () => { socket.disconnect(); };
   }, []);
 
+  /**
+   * Sendet den Nutzer-Prompt ans Backend via Socket.IO.
+   *
+   * Wenn der Viewer sich im manuellen Bearbeitungsmodus befindet, wird zuerst
+   * das aktuelle XML aus bpmn-js ausgelesen und synchronisiert — damit fließen
+   * manuelle Änderungen in den nächsten Generierungsschritt ein.
+   *
+   * Neue Session (kein bestehendes XML): neue UUID erzeugen → neuer Trace-Log.
+   * Folge-Prompt (bestehendes XML): selbe session_id → alle Iterationen im gleichen Trace.
+   */
   const handleSend = async (text: string) => {
     if (!text.trim() || isLoading || !socketRef.current) return;
 
@@ -94,10 +92,10 @@ export default function Home() {
       setViewerMode("view");
     }
 
-    addDebug("emit:generate_bpmn", { prompt: text.slice(0, 60) + "...", has_existing: !!xmlToSend });
     setMessages((prev) => [...prev, { type: "user", text }]);
     setIsLoading(true);
 
+    // Neue Session wenn kein XML vorhanden (Erster Prompt oder nach Fehler)
     if (!xmlToSend) sessionIdRef.current = crypto.randomUUID();
 
     socketRef.current.emit("generate_bpmn", {
@@ -128,7 +126,6 @@ export default function Home() {
           viewerRef={bpmnViewerRef}
           mode={viewerMode}
           onModeChange={async (newMode) => {
-            // Beim Wechsel aus dem Manuell-Modus: XML zuerst synchronisieren
             if (viewerMode === "edit" && newMode === "view" && bpmnViewerRef.current) {
               const latestXml = await bpmnViewerRef.current.getXML();
               if (latestXml) setCurrentBpmnXml(latestXml);
@@ -149,8 +146,6 @@ export default function Home() {
           <BpmnViewer ref={bpmnViewerRef} bpmnXml={currentBpmnXml} mode={viewerMode} />
         </div>
       </div>
-
-      <DebugPanel events={debugEvents} />
     </main>
   );
 }

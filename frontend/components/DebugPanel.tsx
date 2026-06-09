@@ -1,5 +1,19 @@
 "use client";
 
+/**
+ * DebugPanel – Socket.IO-Event-Monitor für die Entwicklungsumgebung.
+ *
+ * Wird ausschließlich im Entwicklungsmodus angezeigt (NODE_ENV !== "production").
+ * In Production-Builds gibt die Komponente null zurück und hat keinen Einfluss
+ * auf Rendering oder Bundle-Größe.
+ *
+ * Zeigt alle empfangenen Socket.IO-Events in umgekehrter chronologischer Reihenfolge
+ * (neueste zuerst) mit Timestamp, Event-Name und den ersten 300 Zeichen der Payload.
+ *
+ * Verwendung: Events werden von der Elternkomponente (page.tsx) gesammelt
+ * und als `events`-Prop übergeben.
+ */
+
 import { useState } from "react";
 
 type DebugEvent = {

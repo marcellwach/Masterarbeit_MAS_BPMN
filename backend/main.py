@@ -1,24 +1,26 @@
 """
-FastAPI + Socket.IO Einstiegspunkt des Backends.
+FastAPI + Socket.IO Backend – Einstiegspunkt des MAS BPMN Generators.
 
-Starten:
+Start:
     cd backend
     python -m uvicorn main:socket_app --host 0.0.0.0 --port 8000
 
-Socket.IO-Events (Empfang vom Frontend):
-    generate_bpmn  { prompt, session_id, existing_bpmn_xml }
+Socket.IO Events (eingehend vom Frontend):
+    generate_bpmn   – startet eine Generierungssession
+                      Payload: { prompt, session_id?, existing_bpmn_xml? }
 
-Socket.IO-Events (Senden an Frontend):
-    status_update      { message, iteration }
-    bpmn_result        { bpmn_xml }
-    generation_failed  { reason }
+Socket.IO Events (ausgehend an das Frontend):
+    status_update      – Iterationsstatus (Textnachricht + Iterationsnummer)
+    bpmn_result        – fertiges BPMN-XML nach erfolgreicher Validierung
+    generation_failed  – Fehler-Benachrichtigung mit Begründung
 
-HTTP-Endpunkte (für Evaluation/Export):
-    GET  /api/export/report         → JSON-Evaluationsbericht (GZ1/GZ2/GZ4)
-    GET  /api/export/traces         → ZIP aller Trace-Logs
-    GET  /api/export/traces/{id}    → einzelner Trace-Log als JSON
-    GET  /api/sessions              → Liste aller Sessions mit Kurzinfo
-    POST /api/validate              → Syntax + Soundness-Prüfung für beliebiges BPMN-XML
+HTTP-Endpunkte:
+    POST /api/validate                     – BPMN-XML syntaktisch + semantisch prüfen
+    GET  /api/sessions                     – alle gespeicherten Sessions auflisten
+    GET  /api/export/traces/{session_id}   – einzelnen Trace-Log als JSON exportieren
+    GET  /api/export/traces                – alle Trace-Logs als ZIP exportieren
+    GET  /api/export/report                – Auswertungsbericht (GZ1/GZ2/GZ4) als JSON
+    GET  /api/export/bpmn/{session_id}     – finales BPMN-XML als .bpmn-Datei
 """
 
 import io
@@ -30,7 +32,7 @@ from pathlib import Path
 
 import socketio
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -40,26 +42,22 @@ from language_interface.bpmn import BpmnLanguageInterface
 
 load_dotenv()
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8000")
 LOG_DIR = Path(os.getenv("LOG_DIR", "traces"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins=[FRONTEND_URL])
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 app = FastAPI(title="MAS BPMN Generator")
 
-# CORS für HTTP-Endpunkte (Frontend auf localhost:3000)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
-    allow_methods=["GET"],
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 socket_app = socketio.ASGIApp(sio, app)
 
-
-# ---------------------------------------------------------------------------
-# Socket.IO Events
-# ---------------------------------------------------------------------------
 
 @sio.on("connect")
 async def on_connect(sid: str, environ: dict) -> None:
@@ -73,7 +71,13 @@ async def on_disconnect(sid: str) -> None:
 
 @sio.on("generate_bpmn")
 async def handle_generate(sid: str, data: dict) -> None:
-    """Empfängt Prompt und startet den LangGraph (create oder modify)."""
+    """
+    Startet eine vollständige BPMN-Generierungssession über den LangGraph.
+
+    Der Graph läuft asynchron: coordinator_init → generator → validator → coordinator_eval.
+    Statusmeldungen werden während der Ausführung per status_update an den Client gesendet.
+    Ergebnis kommt als bpmn_result (Erfolg) oder generation_failed (Fehler/Limit).
+    """
     user_input: str = data.get("prompt", "").strip()
     session_id: str = data.get("session_id") or str(uuid.uuid4())
 
@@ -94,26 +98,36 @@ async def handle_generate(sid: str, data: dict) -> None:
         await sio.emit("generation_failed", {"reason": f"Interner Fehler: {e}"}, to=sid)
 
 
-# ---------------------------------------------------------------------------
-# HTTP-Endpunkte für Export, Evaluation und Validierung
-# ---------------------------------------------------------------------------
+# socket.io setzt intern allow-methods: GET, was den Browser-Preflight für POST blockiert
+@app.options("/api/validate")
+async def options_validate(request: Request):
+    from fastapi.responses import Response
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": FRONTEND_URL,
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Access-Control-Max-Age": "600",
+        }
+    )
+
 
 class ValidateRequest(BaseModel):
     xml: str
-    label: str = ""   # Optionale Bezeichnung (z.B. "GPT-4o Versuch 1")
+    label: str = ""
 
 
 @app.post("/api/validate")
 async def validate_bpmn(req: ValidateRequest):
     """
-    Führt vollständige Syntax- und Soundness-Prüfung für beliebiges BPMN-XML durch.
-    Kann für jedes LLM genutzt werden – einfach das generierte XML einfügen.
+    Führt eine vollständige Validierung eines BPMN-XML-Strings durch.
 
-    Rückgabe:
-      - is_valid:   XML-Wohlgeformtheit + Referenzintegrität
-      - is_sound:   Woflan-Soundness (Petri-Netz-Mapping)
-      - violations: Liste typisierter Fehler mit Beschreibung
-      - summary:    Auswertung mit Empfehlungen
+    Schritt 1: Syntaxprüfung via lxml + XSD-Schema + Referenzintegrität.
+    Schritt 2: Soundness-Prüfung via pm4py/Woflan (synchron, läuft im Thread-Pool).
+    Timeout nach 25s – bei sehr komplexen Modellen wird Woflan übersprungen.
+
+    Gibt Violations gruppiert nach Typ, XML-Statistiken und eine lesbare Summary zurück.
     """
     import time
     if not req.xml.strip():
@@ -121,7 +135,27 @@ async def validate_bpmn(req: ValidateRequest):
 
     li = BpmnLanguageInterface()
     start = time.time()
-    result = li.validate(req.xml)
+    # Woflan blockiert synchron → Thread-Pool damit der Event Loop frei bleibt
+    import asyncio
+    loop = asyncio.get_event_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, li.validate, req.xml),
+            timeout=25.0
+        )
+    except asyncio.TimeoutError:
+        from models.feedback import ErrorType, ValidationResult, Violation
+        from datetime import datetime, timezone
+        result = ValidationResult(
+            is_valid=True,
+            is_sound=False,
+            violations=[Violation(
+                error_type=ErrorType.SEMANTIC_SOUNDNESS,
+                affected_elements=[],
+                description="Soundness-Prüfung übersprungen: Modell zu komplex für Woflan (Timeout nach 25s). Bitte Modell vereinfachen."
+            )],
+            validation_timestamp=datetime.now(timezone.utc).isoformat()
+        )
     elapsed = round(time.time() - start, 3)
 
     # Violations nach Typ gruppieren
@@ -143,7 +177,7 @@ async def validate_bpmn(req: ValidateRequest):
             for v in semantic_violations:
                 summary_lines.append(f"  [{v.error_type.value}] {v.description}")
 
-    # Statistiken aus dem XML
+    # Statistiken aus dem XML (für das Frontend-Dashboard)
     from lxml import etree
     xml_stats = {}
     try:
@@ -181,10 +215,7 @@ async def validate_bpmn(req: ValidateRequest):
 
 @app.get("/api/sessions")
 async def list_sessions():
-    """
-    Gibt eine Liste aller abgeschlossenen Sessions zurück.
-    Enthält session_id, user_input, Iterationszahl und finalen Status.
-    """
+    """Listet alle gespeicherten Sessions mit Status-Kurzübersicht (aus Trace-Logs)."""
     sessions = []
     for path in sorted(LOG_DIR.glob("*.json")):
         try:
@@ -206,7 +237,7 @@ async def list_sessions():
 
 @app.get("/api/export/traces/{session_id}")
 async def export_single_trace(session_id: str):
-    """Gibt den vollständigen Trace-Log einer Session als JSON zurück."""
+    """Gibt den vollständigen Drei-Ebenen-Trace-Log einer Session als JSON zurück."""
     path = LOG_DIR / f"{session_id}.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' nicht gefunden")
@@ -215,10 +246,7 @@ async def export_single_trace(session_id: str):
 
 @app.get("/api/export/traces")
 async def export_all_traces():
-    """
-    Gibt alle Trace-Logs als ZIP-Archiv zurück.
-    Enthält: alle {session_id}.json Dateien aus dem traces/-Verzeichnis.
-    """
+    """Exportiert alle Trace-Logs als ZIP-Archiv (mas_bpmn_traces.zip)."""
     trace_files = list(LOG_DIR.glob("*.json"))
     if not trace_files:
         raise HTTPException(status_code=404, detail="Keine Trace-Logs vorhanden")
@@ -239,12 +267,12 @@ async def export_all_traces():
 @app.get("/api/export/report")
 async def export_evaluation_report():
     """
-    Berechnet den Evaluationsbericht (GZ1/GZ2/GZ4) aus allen Trace-Logs
-    und gibt ihn als JSON zurück.
+    Berechnet den Auswertungsbericht über alle gespeicherten Sessions.
 
-    GZ1 – Syntaktische Konformität (Anteil valider Syntax-Checks)
-    GZ2 – Semantische Korrektheit (Soundness-Rate + Konvergenzrate)
-    GZ4 – Traceability-Vollständigkeit (alle drei Log-Ebenen vorhanden)
+    Metriken:
+        GZ1 – Syntaktische Konformitätsrate (Zielwert: 1.0, garantiert durch DP2)
+        GZ2 – Semantische Korrektheit: Konvergenzrate + Soundness-Rate
+        GZ4 – Traceability-Vollständigkeit (Zielwert: 1.0, garantiert durch DP4)
     """
     trace_files = list(LOG_DIR.glob("*.json"))
     if not trace_files:
@@ -257,7 +285,8 @@ async def export_evaluation_report():
         except Exception:
             pass
 
-    # GZ1: Syntaktische Konformität
+    # GZ1: Syntaktische Konformität (Zielwert: 1.0 – durch DP2 strukturell garantiert)
+    # Berechnung: validation_entries[type="syntax"].passed / total
     total_syntax, passed_syntax = 0, 0
     for log in logs:
         for entry in log.get("validation_entries", []):
@@ -266,7 +295,8 @@ async def export_evaluation_report():
                 if entry.get("passed"):
                     passed_syntax += 1
 
-    # GZ2: Semantische Korrektheit
+    # GZ2: Semantische Korrektheit – Konvergenzrate + Soundness-Rate nach Feedback-Schleife (DP3)
+    # Berechnung: process_entry.termination_reason=="success" / total_sessions
     total_sessions = len(logs)
     success_sessions = sum(
         1 for log in logs
@@ -277,7 +307,8 @@ async def export_evaluation_report():
         if (log.get("process_entry") or {}).get("final_status") == "valid_and_sound"
     )
 
-    # GZ4: Traceability-Vollständigkeit
+    # GZ4: Traceability-Vollständigkeit (Zielwert: 1.0 – durch DP4 strukturell garantiert)
+    # Berechnung: Sessions mit allen drei Log-Ebenen (output + validation + process) / total
     complete_logs = sum(
         1 for log in logs
         if log.get("output_entries")
@@ -293,6 +324,10 @@ async def export_evaluation_report():
     ]
 
     def rate(n, d): return round(n / d, 4) if d > 0 else None
+
+    # GZ3 (Rollenbasierte Architektur) ist keine messbare Metrik – struktureller Nachweis
+    # durch Code-Analyse: generator.py enthält keinen Validator-Aufruf,
+    # validator.py enthält keinen anthropic-Import, coordinator.py erzeugt kein BPMN-XML.
 
     report = {
         "generated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
@@ -333,7 +368,7 @@ async def export_evaluation_report():
 
 @app.get("/api/export/bpmn/{session_id}")
 async def export_bpmn(session_id: str):
-    """Gibt das finale BPMN-XML einer Session als .bpmn-Datei zurück."""
+    """Gibt das finale BPMN-XML einer Session als herunterladbare .bpmn-Datei zurück."""
     path = LOG_DIR / f"{session_id}.json"
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' nicht gefunden")
@@ -348,3 +383,10 @@ async def export_bpmn(session_id: str):
         media_type="application/xml",
         headers={"Content-Disposition": f"attachment; filename={session_id}.bpmn"}
     )
+
+
+# StaticFiles muss nach allen API-Routen stehen – sonst fängt "/" alle Requests ab
+from fastapi.staticfiles import StaticFiles
+_frontend_dir = os.path.join(os.path.dirname(__file__), '..', 'frontend', 'out')
+if os.path.exists(_frontend_dir):
+    app.mount("/", StaticFiles(directory=_frontend_dir, html=True), name="frontend")

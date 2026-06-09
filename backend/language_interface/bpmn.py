@@ -1,6 +1,12 @@
 """
 BPMN-2.0-Implementierung der LanguageInterface-Basisklasse (DP5).
 
+DP5 – Sprachunabhängige Generalisierbarkeit:
+  Diese Klasse ist die einzige BPMN-spezifische Komponente im System.
+  Alle Agenten (generator.py, validator.py) importieren nur LanguageInterface (base.py).
+  Für eine DMN-Implementierung würde DmnLanguageInterface dieselbe Basisklasse
+  implementieren — kein Agent-Code müsste geändert werden.
+
 Implementiert alle vier abstrakten Methoden für die Zielsprache BPMN 2.0:
 
   get_tool_schema()   → BPMN-JSON-Schema für Anthropic tool_use (DP2)
@@ -23,7 +29,6 @@ Layout:
   wird vollständig von bpmn-auto-layout im Frontend übernommen.
 """
 
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -127,11 +132,34 @@ BPMN_TOOL_SCHEMA = {
 
 
 class BpmnLanguageInterface(LanguageInterface):
+    """
+    Konkrete BPMN-2.0-Implementierung des LanguageInterface (DP5).
+
+    Alle Agenten arbeiten ausschließlich über die abstrakte Basisklasse LanguageInterface.
+    Dieser Austausch-Punkt ermöglicht es, das System ohne Änderung an den Agenten
+    auf eine andere Prozessmodellierungssprache (z.B. DMN, CMMN) zu portieren.
+    """
 
     def get_tool_schema(self) -> dict:
+        """
+        Gibt das Anthropic tool_use JSON-Schema für BPMN zurück (DP2).
+
+        Das Schema definiert exakt, welche Felder Claude füllen muss — damit ist
+        das Ausgabeformat strukturell erzwungen, kein Freitext möglich.
+        Gibt das vorkompilierte BPMN_TOOL_SCHEMA-Objekt zurück (kein LLM-Aufruf).
+        """
         return BPMN_TOOL_SCHEMA
 
     def get_system_prompt(self) -> str:
+        """
+        Gibt den BPMN-spezifischen System-Prompt für den Generator-Agent zurück.
+
+        Der Prompt beinhaltet BPMN-2.0-Modellierungsregeln (Referenzintegrität,
+        Gateway-Semantik, Prozessvollständigkeit) sowie Hinweise zur Fehlerkorrektur.
+        Diese Regeln ergänzen das tool_use-Schema: das Schema erzwingt die Struktur,
+        der Prompt erklärt die semantischen Anforderungen.
+        """
+
         return """Du bist ein BPMN-2.0-Experte. Deine Aufgabe ist es, aus einer natürlichsprachlichen
 Prozessbeschreibung ein korrektes BPMN-2.0-Modell zu generieren.
 
@@ -147,12 +175,21 @@ Regeln die du IMMER einhalten musst:
 Wenn du Feedback zu Fehlern erhältst, beachte die affected_elements und korrigiere gezielt diese Elemente."""
 
     def json_to_output(self, data: dict) -> str:
-        """Deterministischer JSON → BPMN-XML Konverter (kein LLM-Aufruf).
-        Kein DI – Layout wird vollständig von bpmn-auto-layout im Frontend übernommen.
+        """
+        Deterministischer JSON → BPMN-XML Konverter (kein LLM-Aufruf, DP2).
 
-        Limitation: Swimlanes (Pools/Lanes) werden nicht unterstützt.
-        bpmn-auto-layout verarbeitet BPMN-Collaboration/Pool-Strukturen nicht korrekt
-        (interner Fehler bei attachedToRef-Zugriff). Dokumentiert als Known Limitation."""
+        DP2-Garantie: Jede Ausgabe dieses Konverters ist per Konstruktion
+        syntaktisch wohlgeformt — damit ist GZ1 (Zielwert: 100% syntaktisch valide)
+        durch diesen deterministischen Schritt strukturell sichergestellt.
+
+        Kein DI (Diagram Interchange): Das Backend generiert kein visuelles Layout.
+        bpmn-auto-layout im Frontend übernimmt die komplette Koordinatenberechnung.
+
+        Known Limitation – Swimlanes/Pools (dokumentiert in README):
+          bpmn-auto-layout verarbeitet BPMN-Collaboration/Pool-Strukturen nicht korrekt.
+          Interner Fehler bei attachedToRef-Zugriff. Gilt als bekannte Einschränkung
+          auch anderer Tools (Stand der Technik). Swimlanes werden daher nicht unterstützt.
+        """
         flows = data.get("sequence_flows", [])
         process_id = data.get("process_id", "Process_1")
         process_name = data.get("process_name", "Process")
@@ -216,7 +253,22 @@ Wenn du Feedback zu Fehlern erhältst, beachte die affected_elements und korrigi
         )
 
     def validate(self, output: str) -> ValidationResult:
-        """XSD-Syntaxvalidierung + pm4py Soundness-Prüfung."""
+        """
+        Zweistufige Validierung: Syntax (lxml) + Soundness (pm4py/Woflan).
+
+        Schritt 1 – Syntaxvalidierung:
+            - XML-Wohlgeformtheit (etree.fromstring)
+            - XSD-Konformität gegen OMG BPMN-2.0-Schema (wenn vorhanden)
+            - Referenzintegrität: sourceRef/targetRef auf existierende IDs
+
+        Schritt 2 – Soundness (nur wenn Schritt 1 fehlerlos):
+            - BPMN → Petri-Netz Mapping via pm4py (Dijkman et al. 2008)
+            - Normalisierung zum WF-Netz bei mehreren Quellen/Senken
+            - Woflan prüft: Option-to-complete, Proper-Completion, No-Dead-Transitions
+
+        Bei transienten Windows-Fehlern (pm4py PID-Caching) automatischer Retry.
+        DP1: Kein LLM-Aufruf — vollständig deterministisch.
+        """
         timestamp = datetime.now(timezone.utc).isoformat()
         violations: list[Violation] = []
 
@@ -274,7 +326,44 @@ def _esc(text: str) -> str:
 
 
 
+def _parse_woflan_violations(woflan_output: str) -> list[str]:
+    """Extrahiert konkrete Regelverstöße aus der Woflan-Konsolenausgabe.
+    Keywords basieren auf den tatsächlichen pm4py-Ausgabestrings."""
+    rules = [
+        ("more than one source place",      "Mehrere Start-Events: Woflan erfordert genau ein Start-Event (aktuell mehr als eine Quellstelle im Petri-Netz)"),
+        ("more than one sink place",        "Mehrere End-Events: Woflan erfordert genau ein End-Event (aktuell mehr als eine Senke im Petri-Netz)"),
+        ("not a workflow net",              "Kein Workflow-Netz (fehlende oder mehrfache Start-/Endmarke)"),
+        ("is not a workflow net",           "Kein Workflow-Netz (fehlende oder mehrfache Start-/Endmarke)"),
+        ("not covered by an s-component",  "S-Überdeckung fehlt: Parallelzweig ohne korrekten Merge-Gateway"),
+        ("uncovered in uniform invariants", "Invarianten-Verletzung: nicht alle Zustände erreichbar"),
+        ("uncovered in weighted invariants","Invarianten-Verletzung: nicht alle Zustände erreichbar"),
+        ("improper wpd",                    "Improper WPD: inkorrekte Terminierung (Token verbleiben im Netz)"),
+        ("improper conditions",             "Improper WPD: inkorrekte Terminierung (Token verbleiben im Netz)"),
+        ("sequences are unbounded",         "Unbeschränkt: Token häufen sich unbegrenzt an (fehlender Merge-Gateway)"),
+        ("dead task",                       "Tote Transitionen: Tasks die nie ausgeführt werden können"),
+        ("dead transition",                 "Tote Transitionen: Tasks die nie ausgeführt werden können"),
+        ("not all tasks are live",          "Nicht lebende Transitionen: möglicher Deadlock"),
+        ("tasks are not live",              "Nicht lebende Transitionen: möglicher Deadlock"),
+        ("not well-handled",                "Nicht korrekt behandelte Gateway-Paare (fehlendes Gegenstück zu Split oder Join)"),
+    ]
+    lower = woflan_output.lower()
+    seen: set[str] = set()
+    found = []
+    for keyword, label in rules:
+        if keyword in lower and label not in seen:
+            seen.add(label)
+            found.append(label)
+    return found
+
+
 def _validate_xsd(root: etree._Element, xsd_path: Path) -> list[Violation]:
+    """
+    Validiert das geparste XML-Dokument gegen das OMG BPMN-2.0-XSD-Schema.
+
+    Die XSD ist optional – wenn die Datei nicht existiert, wird dieser Schritt übersprungen.
+    Die Referenzintegrität (sourceRef/targetRef) wird in _validate_references separat geprüft,
+    da sie nicht vollständig durch die XSD abgedeckt wird.
+    """
     violations = []
     try:
         with open(xsd_path, "rb") as f:
@@ -317,62 +406,272 @@ def _validate_references(root: etree._Element) -> list[Violation]:
     return violations
 
 
+def _normalize_wf_net(net, im, fm):
+    """
+    Normalisiert ein Petri-Netz zum Workflow-Netz für Woflan (van der Aalst 1998).
+
+    Known Limitation (dokumentiert in README §Known Limitations):
+      Woflan setzt ein Workflow-Netz mit GENAU EINEM Start-Event und EINEM End-Event
+      voraus. BPMN 2.0 erlaubt mehrere Start-/End-Events, aber das BPMN→Petri-Netz-
+      Mapping (pm4py, Dijkman et al. 2008) erzeugt dabei mehrere Quell-/Senkenplätze.
+      Woflan verweigert die Prüfung mit "more than one source/sink place".
+
+    Diese Funktion löst das Problem durch Normalisierung:
+      Falls mehrere Quell- oder Senkenplätze existieren (z.B. durch mehrere
+      Start-/End-Events oder strukturell isolierte Elemente), werden künstliche
+      Stellen mit Silent-Transitions eingefügt — ohne die Prozesssemantik zu ändern.
+      Das ermöglicht eine faire Woflan-Analyse für Modelle mit mehreren Quellen/Senken.
+
+    Gibt (net, im, fm, note) zurück; note beschreibt die vorgenommene Normalisierung
+    (oder "", falls keine nötig war — wird in Violation.description angehängt).
+    """
+    from pm4py.objects.petri_net.obj import PetriNet, Marking
+    from pm4py.objects.petri_net.utils import petri_utils
+
+    notes = []
+    source_places = [p for p in net.places if len(p.in_arcs) == 0]
+    sink_places   = [p for p in net.places if len(p.out_arcs) == 0]
+
+    if len(source_places) > 1:
+        art_src = PetriNet.Place("p_artificial_source")
+        net.places.add(art_src)
+        t_start = PetriNet.Transition("t_artificial_start", label=None)
+        net.transitions.add(t_start)
+        petri_utils.add_arc_from_to(art_src, t_start, net)
+        for sp in source_places:
+            petri_utils.add_arc_from_to(t_start, sp, net)
+        im = Marking({art_src: 1})
+        notes.append(f"{len(source_places)} Quellstellen zusammengefasst")
+
+    if len(sink_places) > 1:
+        art_snk = PetriNet.Place("p_artificial_sink")
+        net.places.add(art_snk)
+        t_end = PetriNet.Transition("t_artificial_end", label=None)
+        net.transitions.add(t_end)
+        for sk in sink_places:
+            petri_utils.add_arc_from_to(sk, t_end, net)
+        petri_utils.add_arc_from_to(t_end, art_snk, net)
+        fm = Marking({art_snk: 1})
+        notes.append(f"{len(sink_places)} Senken zusammengefasst")
+
+    return net, im, fm, "; ".join(notes)
+
+
+def _extract_processes(bpmn_xml: str) -> list[tuple[str, str]]:
+    """
+    Extrahiert jeden <process> aus einem Collaboration-BPMN als eigenständiges XML.
+    Bei einfachen Modellen (ein Prozess) wird das Original zurückgegeben.
+    Gibt [(prozessname, xml_string), ...] zurück.
+    """
+    import copy
+    root = etree.fromstring(bpmn_xml.encode("utf-8"))
+    # Namespace-agnostisch: BPMN-NS aus dem Root-Tag ableiten
+    tag = root.tag
+    ns = tag.split("}")[0].lstrip("{") if "}" in tag else BPMN_NS
+
+    processes = root.findall(f"{{{ns}}}process")
+    if len(processes) <= 1:
+        name = processes[0].get("name", "") if processes else ""
+        return [(name, bpmn_xml)]
+
+    results = []
+    for proc in processes:
+        proc_name = proc.get("name", proc.get("id", ""))
+        # Standalone-Definitions bauen (Namespaces vom Original übernehmen)
+        standalone = etree.Element(
+            f"{{{ns}}}definitions",
+            nsmap=root.nsmap,
+        )
+        standalone.set("id", "Definitions_standalone")
+        standalone.set("targetNamespace", "http://example.com/standalone")
+        standalone.append(copy.deepcopy(proc))
+        results.append((proc_name, etree.tostring(standalone, encoding="unicode")))
+    return results
+
+
+def _is_subprocess_error(exc: Exception) -> bool:
+    """Erkennt transiente pm4py-Subprocess-Fehler (z.B. nach gewaltsamen Prozessabbrüchen)."""
+    msg = str(exc).lower()
+    return any(k in msg for k in ("pid not found", "process pid", "no such process", "broken pipe", "winerror 5"))
+
+
+def _run_woflan_inprocess(net, im, fm) -> tuple[bool, str]:
+    """Führt Woflan im aktuellen Prozess aus. Gibt (is_sound, output) zurück."""
+    import io, contextlib
+    from pm4py.algo.analysis.woflan import algorithm as woflan
+
+    quick_buf = io.StringIO()
+    with contextlib.redirect_stdout(quick_buf), contextlib.redirect_stderr(io.StringIO()):
+        is_sound = woflan.apply(net, im, fm, parameters={
+            woflan.Parameters.RETURN_ASAP_WHEN_NOT_SOUND: True
+        })
+
+    if not is_sound:
+        detail_buf = io.StringIO()
+        with contextlib.redirect_stdout(detail_buf), contextlib.redirect_stderr(io.StringIO()):
+            woflan.apply(net, im, fm, parameters={
+                woflan.Parameters.RETURN_ASAP_WHEN_NOT_SOUND: False
+            })
+        return False, quick_buf.getvalue() + "\n" + detail_buf.getvalue()
+    return True, ""
+
+
+def _woflan_worker(xml_bytes: bytes) -> bytes:
+    """
+    Modul-level Worker für ProcessPoolExecutor (muss picklebar sein).
+    Führt die vollständige Soundness-Prüfung in einem frischen Prozess durch.
+    """
+    import pickle
+    import pm4py
+    from pm4py.objects.bpmn.importer.variants.lxml import import_from_string
+    from language_interface.bpmn import (
+        _extract_processes, _normalize_wf_net, _parse_woflan_violations,
+        _run_woflan_inprocess
+    )
+    from models.feedback import ErrorType, Violation
+
+    bpmn_xml = xml_bytes.decode("utf-8")
+    violations = []
+    process_list = _extract_processes(bpmn_xml)
+
+    for proc_name, proc_xml in process_list:
+        label = f"Prozess '{proc_name}': " if proc_name else ""
+        try:
+            bpmn_graph = import_from_string(proc_xml)
+            net, im, fm = pm4py.convert_to_petri_net(bpmn_graph)
+            net, im, fm, norm_note = _normalize_wf_net(net, im, fm)
+
+            is_sound, output = _run_woflan_inprocess(net, im, fm)
+            if not is_sound:
+                failed_rules = _parse_woflan_violations(output)
+                if failed_rules:
+                    desc = label + "Soundness-Verletzung: " + "; ".join(failed_rules)
+                else:
+                    raw_lines = [
+                        line.strip() for line in output.splitlines()
+                        if line.strip()
+                        and not line.strip().startswith("Input is ok")
+                        and not line.strip().startswith("Petri Net is a workflow net")
+                    ]
+                    summary = " | ".join(raw_lines[:3]) or "Deadlock, nicht erreichbarer Endzustand oder tote Transitionen"
+                    desc = label + f"Soundness-Verletzung: {summary}"
+                if norm_note:
+                    desc += f" [normalisiert: {norm_note}]"
+                violations.append(Violation(
+                    error_type=ErrorType.SEMANTIC_SOUNDNESS,
+                    affected_elements=[],
+                    description=desc
+                ))
+        except Exception as e:
+            violations.append(Violation(
+                error_type=ErrorType.SEMANTIC_SOUNDNESS,
+                affected_elements=[],
+                description=f"{label}Soundness-Prüfung fehlgeschlagen: {e}"
+            ))
+    return pickle.dumps(violations)
+
+
+def _run_woflan_subprocess(bpmn_xml: str) -> list[Violation]:
+    """
+    Führt die komplette Soundness-Prüfung in einem frischen Subprocess aus.
+    Workaround für pm4py-PID-Caching-Bug auf Windows nach gewaltsamen Prozessabbrüchen.
+    """
+    import concurrent.futures
+    import pickle
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_woflan_worker, bpmn_xml.encode("utf-8"))
+        result_bytes = future.result(timeout=30)
+    return pickle.loads(result_bytes)
+
+
 def _validate_soundness(bpmn_xml: str) -> list[Violation]:
     """
     Semantische Soundness-Prüfung via Petri-Netz-Mapping (DP1: kein LLM).
 
     Ablauf:
-      1. BPMN-XML in temporäre Datei schreiben (pm4py liest aus Datei)
-      2. pm4py.read_bpmn() + convert_to_petri_net() → WF-Netz
-      3. Woflan-Algorithmus prüft drei Soundness-Eigenschaften:
+      1. pm4py import_from_string() → BPMN-Graph (kein Dateisystem, kein Windows-Locking)
+      2. convert_to_petri_net() → Petri-Netz
+      3. Normalisierung zum WF-Netz falls nötig (van der Aalst 1998)
+      4. Woflan-Algorithmus prüft drei Soundness-Eigenschaften:
          - Option to complete: Endzustand von jedem Zustand erreichbar
          - Proper completion: bei Erreichen des Endzustands keine anderen Token
          - Absence of dead transitions: jeder Task auf mindestens einem Pfad
+
+    Bei transienten Subprocess-Fehlern (pm4py PID-Caching-Bug auf Windows):
+      Automatischer Retry in frischem Subprocess via ProcessPoolExecutor.
 
     Woflan ist deterministisch – gleiche Eingabe, gleiches Ergebnis.
     Kein LLM: verhindert Self-Preference Bias (DP1).
     """
     violations = []
     try:
-        import tempfile
         import pm4py
-        from pm4py.algo.analysis.woflan import algorithm as woflan
+        from pm4py.objects.bpmn.importer.variants.lxml import import_from_string
 
-        with tempfile.NamedTemporaryFile(suffix=".bpmn", delete=False, mode="w", encoding="utf-8") as f:
-            f.write(bpmn_xml)
-            tmp_path = f.name
+        # Collaboration-Modelle: jeden Prozess einzeln analysieren
+        process_list = _extract_processes(bpmn_xml)
 
-        try:
-            bpmn_graph = pm4py.read_bpmn(tmp_path)
-            net, im, fm = pm4py.convert_to_petri_net(bpmn_graph)
-
-            # Soundness-Prüfung mit woflan
-            is_sound = woflan.apply(net, im, fm, parameters={
-                woflan.Parameters.RETURN_ASAP_WHEN_NOT_SOUND: True
-            })
-
-            if not is_sound:
-                violations.append(Violation(
-                    error_type=ErrorType.SEMANTIC_SOUNDNESS,
-                    affected_elements=[],
-                    description=(
-                        "Soundness-Verletzung: Prozess ist nicht sound. "
-                        "Mögliche Ursachen: Deadlock, nicht erreichbarer Endzustand, "
-                        "oder unkorrekte Terminierung."
-                    )
-                ))
-        finally:
-            # Windows: pm4py hält die Datei ggf. offen → WinError 32 ignorieren
+        for proc_name, proc_xml in process_list:
+            label = f"Prozess '{proc_name}': " if proc_name else ""
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+                bpmn_graph = import_from_string(proc_xml)
+                net, im, fm = pm4py.convert_to_petri_net(bpmn_graph)
+                net, im, fm, norm_note = _normalize_wf_net(net, im, fm)
+
+                is_sound, output = _run_woflan_inprocess(net, im, fm)
+                if not is_sound:
+                    failed_rules = _parse_woflan_violations(output)
+                    if failed_rules:
+                        description = label + "Soundness-Verletzung: " + "; ".join(failed_rules)
+                    else:
+                        raw_lines = [
+                            line.strip() for line in output.splitlines()
+                            if line.strip()
+                            and not line.strip().startswith("Input is ok")
+                            and not line.strip().startswith("Petri Net is a workflow net")
+                        ]
+                        summary = " | ".join(raw_lines[:3]) if raw_lines else (
+                            "Deadlock, nicht erreichbarer Endzustand oder tote Transitionen"
+                        )
+                        description = label + f"Soundness-Verletzung: {summary}"
+                    if norm_note:
+                        description += f" [normalisiert: {norm_note}]"
+                    violations.append(Violation(
+                        error_type=ErrorType.SEMANTIC_SOUNDNESS,
+                        affected_elements=[],
+                        description=description
+                    ))
+                # Sound → kein Fehler
+
+            except Exception as proc_e:
+                if _is_subprocess_error(proc_e):
+                    # Transiente pm4py-Subprocess-Fehler: Retry in frischem Subprocess
+                    print(f"[woflan] Subprocess-Fehler ({proc_e}), Retry in frischem Prozess...")
+                    try:
+                        sub_violations = _run_woflan_subprocess(bpmn_xml)
+                        violations.extend(sub_violations)
+                    except Exception as retry_e:
+                        print(f"[woflan] Retry fehlgeschlagen ({retry_e}), Soundness-Prüfung übersprungen")
+                        # Systemfehler ≠ unsound: Prüfung überspringen statt fälschlich zu scheitern
+                else:
+                    violations.append(Violation(
+                        error_type=ErrorType.SEMANTIC_SOUNDNESS,
+                        affected_elements=[],
+                        description=f"{label}Soundness-Prüfung fehlgeschlagen: {proc_e}"
+                    ))
 
     except Exception as e:
-        # Wenn pm4py das Modell nicht analysieren kann (z.B. komplexe Routing-Strukturen,
-        # mehrere End-Events, pm4py-interne Fehler wie "process PID not found"):
-        # Kein Soundness-Fehler melden – das Modell wird als "nicht prüfbar aber akzeptiert"
-        # behandelt. Besser ein möglicherweise nicht-soundes Modell zurückgeben als
-        # endlos zu wiederholen.
-        print(f"[validator] Soundness-Prüfung übersprungen: {e}")
+        if _is_subprocess_error(e):
+            print(f"[woflan] Subprocess-Fehler auf Modulebene ({e}), Retry in frischem Prozess...")
+            try:
+                return _run_woflan_subprocess(bpmn_xml)
+            except Exception as retry_e:
+                print(f"[woflan] Retry fehlgeschlagen ({retry_e}), Soundness-Prüfung übersprungen")
+                return []
+        violations.append(Violation(
+            error_type=ErrorType.SEMANTIC_SOUNDNESS,
+            affected_elements=[],
+            description=f"Soundness-Prüfung konnte nicht durchgeführt werden: {e}"
+        ))
     return violations

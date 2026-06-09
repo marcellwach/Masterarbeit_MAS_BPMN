@@ -44,6 +44,7 @@ type ValidationResult = {
 
 type HistoryEntry = ValidationResult & { id: number };
 
+// Leserfreundliche Bezeichnungen für die ErrorType-Enum-Werte aus dem Backend
 const ERROR_TYPE_LABELS: Record<string, string> = {
   syntax_xsd: "XSD-Syntaxfehler",
   syntax_metamodel: "Metamodell-Verletzung",
@@ -60,6 +61,11 @@ export default function ValidatePage() {
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
 
+  /**
+   * Sendet das BPMN-XML an POST /api/validate und speichert das Ergebnis.
+   * Fügt das Ergebnis außerdem dem lokalen Verlauf hinzu, damit mehrere
+   * LLM-Outputs nebeneinander verglichen werden können.
+   */
   const handleValidate = async () => {
     if (!xml.trim()) return;
     setLoading(true);
@@ -88,6 +94,10 @@ export default function ValidatePage() {
     }
   };
 
+  /**
+   * Exportiert alle Validierungsergebnisse der aktuellen Sitzung als JSON.
+   * Nützlich für den Vergleich mehrerer LLM-Outputs in der Masterarbeit-Auswertung.
+   */
   const downloadHistory = () => {
     const blob = new Blob([JSON.stringify(history, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);

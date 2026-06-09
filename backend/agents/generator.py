@@ -1,21 +1,28 @@
 """
-Generator-Agent (DP1 + DP2: Spezialisierung + Constraint-gesteuerte Generierung).
+Generator-Agent (DP1 + DP2).
 
-Verantwortlichkeit: Generierung von BPMN-XML aus einer natürlichsprachlichen
-Prozessbeschreibung via Anthropic Claude.
+DP1 – Rollenbasierte Agentenspezialisierung:
+  Dieser Agent ruft KEINEN Validator auf und erzeugt ausschließlich BPMN-XML.
+  Kein Validierungsergebnis kommt von hier — das garantiert, dass kein Self-Preference
+  Bias in die Beurteilung der eigenen Ausgabe einfließt.
 
-DP2-Mechanismus: tool_use mit JSON-Schema
-  - tool_choice={"type": "tool", "name": "generate_bpmn"} zwingt Claude,
-    ausschließlich schema-konformes JSON zu liefern.
-  - Ein deterministischer JSON→XML-Konverter (language_interface.json_to_output)
-    erzeugt das finale BPMN-XML ohne LLM-Aufruf.
-  - Syntaktische Wohlgeformtheit ist per Konstruktion garantiert (kein Post-hoc-Retry).
+DP2 – Constraint-gesteuerte Generierung (tool_use statt Outlines):
+  Ursprüngliche Planung war grammar-guided generation via Outlines + BPMN-2.0-XSD.
+  Technischer PoC (Mai 2026) ergab: Outlines 1.3.0 unterstützt keine structured
+  generation mit der Anthropic API (NotImplementedError). Als wissenschaftlich
+  gleichwertiger Mechanismus wird Anthropics tool_use mit JSON-Schema genutzt:
 
-DP1-Regel: KEIN Validator-Aufruf in diesem Agenten.
+    tool_choice="required" → Claude MUSS schema-konformes JSON liefern (API-seitig)
+    Deterministischer JSON→XML-Konverter → syntaktisch wohlgeformtes BPMN-XML
+
+  Die wissenschaftliche Aussagekraft von DP2 bleibt vollständig erhalten:
+  Der Constraint greift API-seitig (Anthropic) statt lokal (Logit-Processor) —
+  in beiden Fällen ist jede Ausgabe per Konstruktion strukturkonform.
+  Kein Post-hoc-Retry nach Syntaxfehler nötig (→ GZ1-Zielwert: 100%).
 
 Iterationsverhalten:
-  - Iteration 1: Prompt = Nutzerbeschreibung (ggf. + bestehendes XML bei Modifikation)
-  - Iteration 2+: Prompt erweitert um typisierte Violation-Objekte (DP3, kein Freitext)
+  Iteration 1 = Nutzerprompt (ggf. mit bestehendem XML bei Modifikation)
+  Iteration 2+ = Nutzerprompt + typisierte Violations als Feedback (DP3)
 """
 
 import os
@@ -29,14 +36,13 @@ from trace_logger.logger import TraceLogger
 
 def _build_prompt(state: AgentState, system_prompt: str) -> list[dict[str, Any]]:
     """
-    Baut den Message-Array für den Claude API-Call auf.
+    Baut die Messages-Liste für den Anthropic-API-Call auf.
 
-    Bei Modifikationen (bestehendes XML vorhanden) wird das XML als Kontext
-    in den Prompt eingebettet. Ab Iteration 2 werden Violation-Objekte als
-    strukturiertes Feedback angehängt (DP3).
+    Iteration 1, Modifikationsmodus: Bestehendes BPMN-XML + Änderungsanweisung.
+    Iteration 1, Neugenerierung:     Nur die Nutzereingabe.
+    Iteration 2+:                    Nutzereingabe + typisierte Violations als Feedback (DP3).
     """
     existing_xml = state.get("current_bpmn_xml", "")
-    # Modifikationsmodus: bestehendes Modell als Ausgangspunkt übergeben
     is_modification = bool(existing_xml) and state["iteration"] == 1
 
     if is_modification:
@@ -76,12 +82,7 @@ def _build_prompt(state: AgentState, system_prompt: str) -> list[dict[str, Any]]
 async def generator_node(state: AgentState, language_interface: LanguageInterface,
                          trace_logger: TraceLogger,
                          client: anthropic.AsyncAnthropic) -> AgentState:
-    """
-    Generiert BPMN via Anthropic tool_use (async, DP2).
-
-    Verwendet AsyncAnthropic damit der asyncio Event Loop während des API-Calls
-    nicht blockiert wird – Socket.IO kann währenddessen Statusmeldungen senden.
-    """
+    """AsyncAnthropic damit der Event Loop während des API-Calls für Socket.IO-Emits frei bleibt."""
     tool_schema = language_interface.get_tool_schema()
     system_prompt = language_interface.get_system_prompt()
     messages = _build_prompt(state, system_prompt)
@@ -98,18 +99,15 @@ async def generator_node(state: AgentState, language_interface: LanguageInterfac
         messages=messages
     )
 
-    # Extrahiere tool_use-Block (durch tool_choice garantiert vorhanden)
     bpmn_json: dict = {}
     for block in response.content:
         if block.type == "tool_use":
             bpmn_json = block.input
             break
 
-    # Deterministischer JSON → BPMN-XML Konverter (kein LLM, DP2)
-    bpmn_xml = language_interface.json_to_output(bpmn_json)
+    bpmn_xml = language_interface.json_to_output(bpmn_json)  # deterministisch, kein LLM (DP2)
 
-    # DP4: Ausgabeebene loggen
-    trace_logger.log_output(
+    trace_logger.log_output(  # DP4: Ausgabeebene
         agent_id="generator",
         iteration=state["iteration"],
         input_data=str(messages),

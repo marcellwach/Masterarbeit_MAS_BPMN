@@ -8,6 +8,17 @@ DmnLanguageInterface erfordert keine Änderung an den Agenten.
 
 Agenten referenzieren ausschließlich diese Basisklasse – nie die konkrete
 BPMN-Implementierung (Dependency Inversion Principle).
+  DP5-Checkliste (aus Lastenheft §7):
+    ✓ LanguageInterface ist abstrakte Basisklasse (diese Datei)
+    ✓ BpmnLanguageInterface implementiert alle abstrakten Methoden
+    ✓ agents/ enthält keinen BPMN-spezifischen Code — nur Imports von LanguageInterface
+    ✓ Ein Austausch BpmnLanguageInterface → DmnLanguageInterface erfordert
+      KEINE Änderung an generator.py, validator.py oder coordinator.py
+
+  Dependency Inversion Principle:
+    High-level Modules (Agenten) hängen von Abstraktionen (LanguageInterface) ab,
+    nicht von konkreten Implementierungen (BpmnLanguageInterface).
+    Das macht das System auf andere Prozessmodellierungssprachen portierbar.
 """
 
 from abc import ABC, abstractmethod
@@ -16,71 +27,35 @@ from models.feedback import ValidationResult
 
 class LanguageInterface(ABC):
     """
-    Abstrakte Schnittstelle für eine Modellierungssprache.
+    Abstrakte Basisklasse: definiert den Vertrag für alle Prozessmodellierungssprachen (DP5).
 
-    Implementierungen müssen vier Methoden bereitstellen:
-      - get_tool_schema()  → Constraint-Mechanismus für den Generator (DP2)
-      - get_system_prompt() → Sprachspezifisches Expertenwissen für Claude
-      - json_to_output()   → Deterministischer Konverter JSON → Zielsprache
-      - validate()         → Formale Syntaxprüfung + semantische Prüfung (DP1)
+    Agenten-Nodes importieren ausschließlich diese Klasse — nie die konkreten Implementierungen.
+    Dadurch kann die Zielsprache (BPMN, DMN, CMMN, …) ausgetauscht werden, ohne einen
+    einzigen Agenten-Node zu modifizieren (Open/Closed Principle, Dependency Inversion).
+
+    Jede Implementierung muss alle vier Methoden bereitstellen:
+      get_tool_schema()  – Strukturkonstraint für das LLM (DP2)
+      get_system_prompt()– Fachliches Expertenwissen für den Generator
+      json_to_output()   – Deterministischer Konverter (kein LLM, DP2)
+      validate()         – Formale Prüfung ohne LLM (DP1)
     """
 
     @abstractmethod
     def get_tool_schema(self) -> dict:
-        """
-        Gibt das Anthropic tool_use JSON-Schema für die Zielsprache zurück.
-
-        Das Schema definiert die Struktur, die Claude per tool_use garantiert
-        liefert (DP2: Constraint-gesteuerte Generierung). Claude kann keinen
-        Output erzeugen, der nicht diesem Schema entspricht.
-
-        Returns:
-            Anthropic-kompatibles Tool-Definition-Dict mit name, description
-            und input_schema.
-        """
+        """Anthropic tool_use JSON-Schema — zwingt Claude zu schema-konformem Output (DP2)."""
         pass
 
     @abstractmethod
     def get_system_prompt(self) -> str:
-        """
-        Gibt den sprachspezifischen System-Prompt für den Generator-Agent zurück.
-
-        Beschreibt Claude die Modellierungskonventionen der Zielsprache,
-        häufige Fehler und die Regeln für valide Modelle.
-        """
+        """Sprachspezifisches Expertenwissen für den Generator-Agent."""
         pass
 
     @abstractmethod
     def json_to_output(self, data: dict) -> str:
-        """
-        Konvertiert das tool_use-Ergebnis deterministisch in die Zielsprache.
-
-        Kein LLM-Aufruf – reine Transformation. Dies ist der zweite Teil von
-        DP2: auch wenn tool_use das JSON garantiert, muss der JSON→XML-Konverter
-        deterministisch und fehlerfrei sein.
-
-        Args:
-            data: tool_use input_schema-konformes JSON-Dict
-        Returns:
-            Vollständiger Ausgabe-String (z.B. BPMN-XML)
-        """
+        """Deterministischer JSON → Zielsprache Konverter, kein LLM (DP2)."""
         pass
 
     @abstractmethod
     def validate(self, output: str) -> ValidationResult:
-        """
-        Führt die vollständige formale Validierung durch (DP1: kein LLM).
-
-        Zwei Prüfungen:
-          1. Syntaxprüfung: XML-Wohlgeformtheit + XSD-Konformität (lxml)
-          2. Semantische Prüfung: Soundness via Petri-Netz-Mapping (pm4py)
-
-        Kein LLM-Aufruf – ausschließlich deterministische formale Verfahren,
-        um Self-Preference Bias zu vermeiden (DP1).
-
-        Args:
-            output: Zu prüfender Ausgabe-String
-        Returns:
-            ValidationResult mit is_valid, is_sound und violations[]
-        """
+        """Formale Syntaxprüfung + semantische Prüfung, kein LLM (DP1)."""
         pass

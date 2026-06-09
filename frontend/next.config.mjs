@@ -1,5 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: 'export',
+  trailingSlash: true,
   webpack: (config) => {
     // bpmn-js uses ES modules and requires proper handling
     config.resolve.fallback = { fs: false, path: false };

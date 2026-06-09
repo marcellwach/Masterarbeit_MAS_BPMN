@@ -58,7 +58,7 @@ export default function ChatPanel({ messages, isLoading, onSend }: Props) {
       {/* Header */}
       <div className="px-4 py-3 border-b border-gray-700 bg-gray-900">
         <h1 className="font-semibold text-base">BPMN-Generator</h1>
-        <p className="text-xs text-gray-400">Multi-Agenten-System · Masterarbeit</p>
+        <p className="text-xs text-gray-400">Multi-Agenten-System</p>
       </div>
 
       {/* Nachrichtenverlauf */}

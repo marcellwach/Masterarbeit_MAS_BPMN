@@ -15,15 +15,15 @@ Das System generiert aus einer natürlichsprachlichen Prozessbeschreibung automa
 Nutzer gibt Prozessbeschreibung ein
           ↓
     [Generator-Agent]  ←──────────────────────────┐
-    Claude Sonnet 4.6                              │
-    tool_use → JSON → XML (DP2)                    │
-          ↓                                        │
-    [Validator-Agent]                              │
-    lxml: XSD-Syntaxcheck                          │
-    pm4py: Woflan Soundness-Check (DP1)            │
-          ↓                                        │
-    [Koordinator-Agent]                            │
-    Valide & Sound? → BPMN anzeigen          Nein →┘
+    Claude Sonnet 4.6                             │
+    tool_use → JSON → XML (DP2)                   │
+          ↓                                       │
+    [Validator-Agent]                             │
+    lxml: XSD-Syntaxcheck                         │
+    pm4py: Woflan Soundness-Check (DP1)           │
+          ↓                                       │
+    [Koordinator-Agent]                           │
+    Valide & Sound? → BPMN anzeigen         Nein →┘
                     → Trace-Log schreiben (DP4)
 ```
 
@@ -165,9 +165,10 @@ Das Frontend sendet bei Folge-Prompts das bestehende BPMN-XML mit. Claude erhäl
 
 1. **XSD-Validierung**: Nur Wohlgeformtheit + Referenzintegrität (OMG BPMN 2.0 XSD ist multi-file, nicht direkt ladbar)
 2. **Swimlanes/Pools**: Nicht unterstützt – `bpmn-auto-layout` verarbeitet BPMN-Collaboration-Strukturen nicht korrekt (`attachedToRef`-Bug). Gilt als Stand der Technik auch für andere Tools.
-3. **Random Seed**: Anthropic API unterstützt keinen Seed-Parameter
-4. **Baseline-Vergleich**: Monolithisches System und GPT-4o-Vergleich nicht implementiert
-5. **Wiederholungen**: 3x-Wiederholung pro Testszenario nicht automatisiert
+3. **Woflan: Mehrere Start-/End-Events**: Woflan setzt ein Workflow-Netz mit **genau einem Start-Event und einem End-Event** voraus. BPMN 2.0 erlaubt mehrere Start-/Endevents, aber das BPMN→Petri-Netz-Mapping (pm4py, Dijkman et al. 2008) erzeugt dabei mehrere Quell-/Senkenplätze. Woflan verweigert die Prüfung mit „more than one source/sink place" – der Validator meldet dies explizit. Der Generator ist auf ein Start- und ein End-Event ausgelegt und ist davon nicht betroffen.
+4. **Random Seed**: Anthropic API unterstützt keinen Seed-Parameter
+5. **Baseline-Vergleich**: Monolithisches System und GPT-4o-Vergleich nicht implementiert
+6. **Wiederholungen**: 3x-Wiederholung pro Testszenario nicht automatisiert
 
 ---
 

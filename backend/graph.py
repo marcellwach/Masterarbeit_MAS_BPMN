@@ -22,6 +22,21 @@ Abhängigkeiten werden via functools.partial in jeden Node injiziert:
   - TraceLogger (DP4)
   - AsyncAnthropic-Client
   - Socket.IO-Server + Client-SID (für Statusmeldungen)
+
+DP-Checkliste (aus Lastenheft §7):
+  DP1: Generator ruft keinen Validator auf ✓ (getrennte Nodes, kein Direktaufruf)
+       Validator ruft keine LLM-API auf ✓ (nur lxml + pm4py)
+       Koordinator erzeugt kein BPMN-XML ✓ (nur Steuerung)
+       Kommunikation über AgentState ✓ (LangGraph-Mechanismus)
+  DP2: tool_choice="required" erzwingt schema-konformen JSON-Output ✓
+       Deterministischer JSON→XML-Konverter ✓
+  DP3: LangGraph conditional edge implementiert ✓ (should_continue)
+       Feedback ist Pydantic-Violation-Objekt ✓ (kein Freitext)
+       Abbruchbedingung: max_iterations ✓
+  DP4: TraceLogger schreibt nach jeder Node-Ausführung ✓
+       Drei Ebenen vollständig ✓
+  DP5: Agenten referenzieren LanguageInterface (Basisklasse) ✓
+       BpmnLanguageInterface ist austauschbar ✓
 """
 
 import os
