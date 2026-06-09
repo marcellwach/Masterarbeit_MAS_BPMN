@@ -1,15 +1,9 @@
 """
 Abstrakte Basisklasse für sprachspezifische Komponenten (DP5: Sprachunabhängigkeit).
 
-DP5 beschreibt, dass die Kernarchitektur (Agenten, Feedback-Schleifen, Logging)
-von der konkreten Modellierungssprache entkoppelt sein muss. Diese Klasse ist
-der Koppelpunkt: ein Austausch von BpmnLanguageInterface gegen z.B.
-DmnLanguageInterface erfordert keine Änderung an den Agenten.
 DP5 – Sprachunabhängige Generalisierbarkeit:
   Agenten referenzieren ausschließlich diese Basisklasse — nie die konkrete BPMN-Implementierung.
 
-Agenten referenzieren ausschließlich diese Basisklasse – nie die konkrete
-BPMN-Implementierung (Dependency Inversion Principle).
   DP5-Checkliste (aus Lastenheft §7):
     ✓ LanguageInterface ist abstrakte Basisklasse (diese Datei)
     ✓ BpmnLanguageInterface implementiert alle abstrakten Methoden
