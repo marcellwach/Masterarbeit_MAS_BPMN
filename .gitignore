@@ -18,6 +18,7 @@ frontend/out/
 # Logs & Traces
 backend.log
 traces/
+validations/
 report.json
 report.md
 

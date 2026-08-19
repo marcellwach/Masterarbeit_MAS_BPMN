@@ -190,15 +190,20 @@ Wenn du Feedback zu Fehlern erhältst, beachte die affected_elements und korrigi
           Interner Fehler bei attachedToRef-Zugriff. Gilt als bekannte Einschränkung
           auch anderer Tools (Stand der Technik). Swimlanes werden daher nicht unterstützt.
         """
-        flows = data.get("sequence_flows", [])
-        process_id = data.get("process_id", "Process_1")
-        process_name = data.get("process_name", "Process")
+        # Nur echte Dicts akzeptieren – Claude kann in Randfällen Strings statt Objekte liefern
+        def _dicts(key: str) -> list:
+            items = data.get(key, []) or []
+            return [x for x in items if isinstance(x, dict)]
+
+        flows       = _dicts("sequence_flows")
+        process_id  = data.get("process_id", "Process_1") if isinstance(data, dict) else "Process_1"
+        process_name = data.get("process_name", "Process") if isinstance(data, dict) else "Process"
 
         def incoming_flows(eid):
-            return [f["id"] for f in flows if f["target_ref"] == eid]
+            return [f["id"] for f in flows if f.get("target_ref") == eid]
 
         def outgoing_flows(eid):
-            return [f["id"] for f in flows if f["source_ref"] == eid]
+            return [f["id"] for f in flows if f.get("source_ref") == eid]
 
         def flow_refs(eid, direction):
             tag = "incoming" if direction == "in" else "outgoing"
@@ -207,34 +212,34 @@ Wenn du Feedback zu Fehlern erhältst, beachte die affected_elements und korrigi
 
         # Prozess-Elemente
         elements = []
-        for se in data.get("start_events", []):
+        for se in _dicts("start_events"):
             elements.append(
-                f'<startEvent id="{se["id"]}" name="{_esc(se["name"])}">'
+                f'<startEvent id="{se["id"]}" name="{_esc(se.get("name", ""))}">'
                 f'{flow_refs(se["id"], "out")}</startEvent>'
             )
-        for task in data.get("tasks", []):
+        for task in _dicts("tasks"):
             elements.append(
-                f'<task id="{task["id"]}" name="{_esc(task["name"])}">'
+                f'<task id="{task["id"]}" name="{_esc(task.get("name", ""))}">'
                 f'{flow_refs(task["id"], "in")}{flow_refs(task["id"], "out")}</task>'
             )
-        for gw in data.get("gateways", []):
+        for gw in _dicts("gateways"):
             # isMarkerVisible gehört ins DI (BPMNShape), nicht ins Prozess-Element
             gw_type = gw.get("type", "exclusiveGateway")
             elements.append(
-                f'<{gw_type} id="{gw["id"]}" name="{_esc(gw["name"])}">'
+                f'<{gw_type} id="{gw["id"]}" name="{_esc(gw.get("name", ""))}">'
                 f'{flow_refs(gw["id"], "in")}{flow_refs(gw["id"], "out")}</{gw_type}>'
             )
-        for ee in data.get("end_events", []):
+        for ee in _dicts("end_events"):
             elements.append(
-                f'<endEvent id="{ee["id"]}" name="{_esc(ee["name"])}">'
+                f'<endEvent id="{ee["id"]}" name="{_esc(ee.get("name", ""))}">'
                 f'{flow_refs(ee["id"], "in")}</endEvent>'
             )
         for flow in flows:
             name_attr = f' name="{_esc(flow["name"])}"' if flow.get("name") else ""
             elements.append(
                 f'<sequenceFlow id="{flow["id"]}" '
-                f'sourceRef="{flow["source_ref"]}" '
-                f'targetRef="{flow["target_ref"]}"{name_attr}/>'
+                f'sourceRef="{flow.get("source_ref", "")}" '
+                f'targetRef="{flow.get("target_ref", "")}"{name_attr}/>'
             )
 
         elements_xml = "\n    ".join(elements)
@@ -416,11 +421,22 @@ def _normalize_wf_net(net, im, fm):
       Mapping (pm4py, Dijkman et al. 2008) erzeugt dabei mehrere Quell-/Senkenplätze.
       Woflan verweigert die Prüfung mit "more than one source/sink place".
 
-    Diese Funktion löst das Problem durch Normalisierung:
-      Falls mehrere Quell- oder Senkenplätze existieren (z.B. durch mehrere
-      Start-/End-Events oder strukturell isolierte Elemente), werden künstliche
-      Stellen mit Silent-Transitions eingefügt — ohne die Prozesssemantik zu ändern.
-      Das ermöglicht eine faire Woflan-Analyse für Modelle mit mehreren Quellen/Senken.
+    Diese Funktion löst das Problem durch XOR-Normalisierung:
+      Falls mehrere Quell- oder Senkenplätze existieren, werden sie als ALTERNATIVE
+      Auslöser bzw. Abschlüsse zusammengefasst — je Quelle/Senke eine eigene
+      Silent-Transition zur/von der künstlichen Quelle/Senke:
+
+        Quellen:  p_art_source → t_start_i → source_place_i   (genau ein Start feuert)
+        Senken:   sink_place_i → t_end_i → p_art_sink          (irgendein Ende terminiert)
+
+      Das entspricht der BPMN-Semantik mehrerer Start-/End-Events (alternative Trigger
+      bzw. Abschlüsse) und der Standard-WF-Netz-Normalisierung (van der Aalst).
+
+    Annahme (für die Masterarbeit zu dokumentieren):
+      Mehrfache Start-/End-Events werden als EXKLUSIVE Alternativen interpretiert.
+      Für den selteneren Fall echt NEBENLÄUFIGER Enden (paralleler Split ohne Join)
+      ist diese Normalisierung nachsichtig — eine dortige "improper completion"
+      würde nicht als Soundness-Verletzung erkannt.
 
     Gibt (net, im, fm, note) zurück; note beschreibt die vorgenommene Normalisierung
     (oder "", falls keine nötig war — wird in Violation.description angehängt).
@@ -433,26 +449,38 @@ def _normalize_wf_net(net, im, fm):
     sink_places   = [p for p in net.places if len(p.out_arcs) == 0]
 
     if len(source_places) > 1:
+        # XOR-Split: künstliche Quelle mit einer Silent-Transition PRO Quellstelle.
+        # Semantik: "genau ein Start-Event triggert den Prozess" (alternative Auslöser,
+        # BPMN-konform). Der frühere AND-Split (EINE Transition, die in alle Quellen
+        # produziert) erzwang paralleles Starten aller Start-Events — bei alternativen
+        # Triggern semantisch falsch und Zustandsraum-treibend.
         art_src = PetriNet.Place("p_artificial_source")
         net.places.add(art_src)
-        t_start = PetriNet.Transition("t_artificial_start", label=None)
-        net.transitions.add(t_start)
-        petri_utils.add_arc_from_to(art_src, t_start, net)
-        for sp in source_places:
+        for idx, sp in enumerate(source_places):
+            t_start = PetriNet.Transition(f"t_artificial_start_{idx}", label=None)
+            net.transitions.add(t_start)
+            petri_utils.add_arc_from_to(art_src, t_start, net)
             petri_utils.add_arc_from_to(t_start, sp, net)
         im = Marking({art_src: 1})
-        notes.append(f"{len(source_places)} Quellstellen zusammengefasst")
+        notes.append(f"{len(source_places)} Quellstellen als alternative Auslöser (XOR) zusammengefasst")
 
     if len(sink_places) > 1:
+        # XOR-Merge: eine Silent-Transition PRO Senke, alle produzieren in DENSELBEN
+        # künstlichen Sink. Semantik: "irgendein End-Event erreicht → Netz terminiert"
+        # (alternative Abschlüsse). Der frühere AND-Join (EINE Transition mit
+        # Eingangskanten aus allen Senken) verlangte fälschlich, dass ALLE End-Events
+        # gleichzeitig markiert sind — bei exklusiven Enden unerfüllbar, wodurch der
+        # künstliche Endzustand unerreichbar wurde und Woflan im Coverability-Graph
+        # bis zum Timeout suchte.
         art_snk = PetriNet.Place("p_artificial_sink")
         net.places.add(art_snk)
-        t_end = PetriNet.Transition("t_artificial_end", label=None)
-        net.transitions.add(t_end)
-        for sk in sink_places:
+        for idx, sk in enumerate(sink_places):
+            t_end = PetriNet.Transition(f"t_artificial_end_{idx}", label=None)
+            net.transitions.add(t_end)
             petri_utils.add_arc_from_to(sk, t_end, net)
-        petri_utils.add_arc_from_to(t_end, art_snk, net)
+            petri_utils.add_arc_from_to(t_end, art_snk, net)
         fm = Marking({art_snk: 1})
-        notes.append(f"{len(sink_places)} Senken zusammengefasst")
+        notes.append(f"{len(sink_places)} Senken als alternative Abschlüsse (XOR) zusammengefasst")
 
     return net, im, fm, "; ".join(notes)
 

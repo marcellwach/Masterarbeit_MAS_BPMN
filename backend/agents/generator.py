@@ -25,6 +25,7 @@ Iterationsverhalten:
   Iteration 2+ = Nutzerprompt + typisierte Violations als Feedback (DP3)
 """
 
+import json
 import os
 from typing import Any
 
@@ -102,7 +103,14 @@ async def generator_node(state: AgentState, language_interface: LanguageInterfac
     bpmn_json: dict = {}
     for block in response.content:
         if block.type == "tool_use":
-            bpmn_json = block.input
+            raw = block.input
+            # block.input ist normalerweise ein dict – defensiv parsen falls JSON-String
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except Exception:
+                    raw = {}
+            bpmn_json = raw if isinstance(raw, dict) else {}
             break
 
     bpmn_xml = language_interface.json_to_output(bpmn_json)  # deterministisch, kein LLM (DP2)

@@ -46,6 +46,11 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8000")
 LOG_DIR = Path(os.getenv("LOG_DIR", "traces"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+# Jeder /api/validate-Aufruf (auch fremde XMLs von der Validator-Seite) wird hier
+# als vollständiger Nachweis persistiert: XML, Ergebnis, Violations, Timing, Fehler.
+VALIDATION_LOG_DIR = Path(os.getenv("VALIDATION_LOG_DIR", "validations"))
+VALIDATION_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 app = FastAPI(title="MAS BPMN Generator")
 
@@ -130,11 +135,15 @@ async def validate_bpmn(req: ValidateRequest):
     Gibt Violations gruppiert nach Typ, XML-Statistiken und eine lesbare Summary zurück.
     """
     import time
+    from datetime import datetime, timezone
     if not req.xml.strip():
         raise HTTPException(status_code=400, detail="Kein XML übergeben.")
 
     li = BpmnLanguageInterface()
+    started_at = datetime.now(timezone.utc).isoformat()
     start = time.time()
+    timed_out = False   # True falls Woflan das 25s-Limit überschritten hat
+    error_info = None   # gefüllt bei unerwarteter Exception (kein Timeout)
     # Woflan blockiert synchron → Thread-Pool damit der Event Loop frei bleibt
     import asyncio
     loop = asyncio.get_event_loop()
@@ -145,7 +154,7 @@ async def validate_bpmn(req: ValidateRequest):
         )
     except asyncio.TimeoutError:
         from models.feedback import ErrorType, ValidationResult, Violation
-        from datetime import datetime, timezone
+        timed_out = True
         result = ValidationResult(
             is_valid=True,
             is_sound=False,
@@ -153,6 +162,19 @@ async def validate_bpmn(req: ValidateRequest):
                 error_type=ErrorType.SEMANTIC_SOUNDNESS,
                 affected_elements=[],
                 description="Soundness-Prüfung übersprungen: Modell zu komplex für Woflan (Timeout nach 25s). Bitte Modell vereinfachen."
+            )],
+            validation_timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    except Exception as exc:
+        from models.feedback import ErrorType, ValidationResult, Violation
+        error_info = f"{type(exc).__name__}: {exc}"
+        result = ValidationResult(
+            is_valid=False,
+            is_sound=False,
+            violations=[Violation(
+                error_type=ErrorType.SEMANTIC_SOUNDNESS,
+                affected_elements=[],
+                description=f"Validierung mit internem Fehler abgebrochen: {error_info}"
             )],
             validation_timestamp=datetime.now(timezone.utc).isoformat()
         )
@@ -199,7 +221,7 @@ async def validate_bpmn(req: ValidateRequest):
     except Exception:
         pass
 
-    return {
+    response = {
         "label": req.label,
         "is_valid": result.is_valid,
         "is_sound": result.is_sound,
@@ -211,6 +233,41 @@ async def validate_bpmn(req: ValidateRequest):
         "semantic_violations_count": len(semantic_violations),
         "summary": summary_lines,
     }
+
+    # Vollständigen Nachweis dieses Validate-Aufrufs persistieren (validations/<ts>_<uuid>.json).
+    # Enthält das komplette XML, das Ergebnis, alle Violations, Timing und Fehler-/Timeout-Status.
+    try:
+        validation_id = str(uuid.uuid4())
+        record = {
+            "validation_id": validation_id,
+            "label": req.label,
+            "started_at": started_at,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "duration_seconds": elapsed,
+            "timed_out": timed_out,          # True → Woflan >25s abgebrochen
+            "error": error_info,             # None, außer bei unerwarteter Exception
+            "is_valid": result.is_valid,
+            "is_sound": result.is_sound,
+            "syntax_violations_count": len(syntax_violations),
+            "semantic_violations_count": len(semantic_violations),
+            "violations": [v.model_dump() for v in result.violations],
+            "summary": summary_lines,
+            "xml_stats": xml_stats,
+            "xml_length": len(req.xml),
+            "xml": req.xml,                  # vollständiges eingereichtes BPMN-XML
+        }
+        # Dateiname mit sortierbarem Zeitstempel-Präfix
+        ts_prefix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        out_path = VALIDATION_LOG_DIR / f"{ts_prefix}_{validation_id}.json"
+        out_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[validate] Nachweis gespeichert: {out_path.name} "
+              f"(valid={result.is_valid}, sound={result.is_sound}, "
+              f"timeout={timed_out}, {elapsed}s)")
+    except Exception as log_exc:
+        # Logging darf die Antwort niemals verhindern
+        print(f"[validate] WARN: Nachweis konnte nicht gespeichert werden: {log_exc}")
+
+    return response
 
 
 @app.get("/api/sessions")
